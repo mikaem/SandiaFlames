@@ -21,8 +21,8 @@ set_log_active(False)
 params = dict(
     R1 = 3.6e-3,  # Inner radius pilot
     R2 = 9.1e-3,  # Outer radius pilot
-    H = 0.20,     # Length of mesh
-    L = 0.5,      # Height of mesh
+    H = 0.15,     # Length of mesh
+    L = 0.4,      # Height of mesh
     cl4 = 0.0015, # Mesh density (L, 0)
     cl3 = 0.005,  # Mesh density (L, H)
     cl2 = 0.005,  # Mesh density (0, H)
@@ -72,7 +72,8 @@ Line Loop(8) = {3, 4, 5, 6, 1, 2};
 Plane Surface(8) = {8};
 """ % params
 
-if "remesh" in commandline_kwargs and commandline_kwargs["remesh"] == True:
+if not os.path.isfile("../mesh/Sandia.xml") or ("remesh" in commandline_kwargs 
+                                                and commandline_kwargs["remesh"] == True):
     f = open("../mesh/Sandia.geo", "w")
     f.write(meshcode)
     f.close()
