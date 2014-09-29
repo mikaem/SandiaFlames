@@ -5,45 +5,91 @@ __license__  = "GNU Lesser GPL version 3 or any later version"
 
 from dolfin import *
 from numpy import array, linspace, log, minimum, maximum
-
-import os
+from collections import defaultdict
+import numpy
+import json
+import os, sys
 
 parameters["linear_algebra_backend"] = "PETSc"
-parameters["form_compiler"]["optimize"] = True
+#parameters["form_compiler"]["optimize"] = True
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["representation"] = "quadrature"
-parameters["form_compiler"]["quadrature_degree"] = 2 
+#parameters["form_compiler"]["quadrature_degree"] = 2 
 parameters["form_compiler"]["cpp_optimize_flags"] = "-O3 --fast-math"
+set_log_active(False)
 
-if not os.path.isfile("../mesh/Sandia.xml"):
+params = dict(
+    R1 = 3.6e-3,  # Inner radius pilot
+    R2 = 9.1e-3,  # Outer radius pilot
+    H = 0.20,     # Length of mesh
+    L = 0.5,      # Height of mesh
+    cl4 = 0.0015, # Mesh density (L, 0)
+    cl3 = 0.005,  # Mesh density (L, H)
+    cl2 = 0.005,  # Mesh density (0, H)
+    cl1 = 0.0001, # Mesh density (0, 0)
+    case = "D",
+    model = "CR", #Velocity-pressure function spaces
+    beta = 0.25,  # Numerical stability parameter
+    runDG = False,# DG model or not (experimental)
+    nu = Constant(1.58e-5),
+    max_error = 1e-6,
+    coupled = False,
+    max_iters = 200
+)
+
+# Any parameter may be overloaded on command line
+commandline_kwargs = {}
+for s in sys.argv[1:]:
+    if s.count('=') == 1:
+        key, value = s.split('=', 1)
+    else:
+        raise TypeError(s+" Only kwargs separated with '=' sign allowed")
     try:
-        os.system("gmsh ../mesh/Sandia.geo -2 -o ../mesh/Sandia.msh")
-        os.system("dolfin-convert ../mesh/Sandia.msh ../mesh/Sandia.xml")
-        os.system("rm ../mesh/Sandia.msh")
-    except RuntimeError:
-        raise "Gmsh is required to run this program"
-      
+        value = json.loads(value) 
+    except ValueError:
+        if value in ("True", "False"): # json understands true/false, but not True/False
+            value = eval(value)
+    if key in params:
+        params[key] = value
+    else:
+        commandline_kwargs[key] = value
+
+# Create a Gmsh-mesh and load it
+meshcode = """
+Point(1) = {0, 0, 0, %(cl1)s};
+Point(2) = {0, %(R1)s, 0, %(cl1)s};
+Point(3) = {0, %(R2)s, 0, %(cl1)s};
+Point(4) = {0, %(H)s, 0, %(cl2)s};
+Point(5) = {%(L)s, %(H)s, 0, %(cl3)s};
+Point(6) = {%(L)s, 0, 0, %(cl4)s};
+Line(1) = {1, 2};
+Line(2) = {2, 3};
+Line(3) = {3, 4};
+Line(4) = {4, 5};
+Line(5) = {5, 6};
+Line(6) = {6, 1};
+Line Loop(8) = {3, 4, 5, 6, 1, 2};
+Plane Surface(8) = {8};
+""" % params
+
+if "remesh" in commandline_kwargs and commandline_kwargs["remesh"] == True:
+    f = open("../mesh/Sandia.geo", "w")
+    f.write(meshcode)
+    f.close()
+    os.system("gmsh ../mesh/Sandia.geo -2 -o ../mesh/Sandia.msh")
+    os.system("dolfin-convert ../mesh/Sandia.msh ../mesh/Sandia.xml")
+    os.system("rm ../mesh/Sandia.msh")
+
 mesh = Mesh("../mesh/Sandia.xml")
 
-R1 = 3.6e-3 # m
-R2 = 9.1e-3 
+vars().update(params)
+vars().update(commandline_kwargs)
 
-R11 = 3.5e-3 # m
-R12 = 3.7e-3
-R21 = 9.0e-3 
-R22 = 9.2e-3 
-
-H = 0.15
-L = 0.3
 Lm = 2*0.07*R1
-re_high = False
-nu = 1.58e-5  # m**2/s
-max_error = 1e-8
-velocity_degree = 2
-max_iters = 25
 
-##
-case = "D"
+# Underrelaxation factors
+omega = defaultdict(lambda : 0.8, {"nut": 0.8})
+
 ##
 cases = {
       "C": {'U_jet': 29.7, # m/s
@@ -55,132 +101,168 @@ cases = {
             'U_coflow': 0.9}
       }
 
-uin = Expression(("0.5*(1.0+erf((R1-x[1])/0.0005))*Uj + Uc + (1.0-Uc)*0.5*(1+erf((R2-x[1])/0.0005))*(Up-Uc)", "0"),
+uin = Expression(("0.5*(1.0+erf((R1-x[1])/0.001))*Uj + Uc + (1.0-Uc)*0.5*(1+erf((R2-x[1])/0.001))*(Up-Uc)", "0"),
+                 R1=R1, R2=R2, Up=cases[case]["U_pilot"], Uc=cases[case]["U_coflow"], Uj=cases[case]["U_jet"])
+
+uin0 = Expression("0.5*(1.0+erf((R1-x[1])/0.001))*Uj + Uc + (1.0-Uc)*0.5*(1+erf((R2-x[1])/0.001))*(Up-Uc)",
                  R1=R1, R2=R2, Up=cases[case]["U_pilot"], Uc=cases[case]["U_coflow"], Uj=cases[case]["U_jet"])
 
 # k-epsilon model coefficients
 model_prm = dict(
     Cmu = Constant(0.09),
-    Ce1 = Constant(1.44),
+    Ce1 = Constant(1.6), # modification from 1.44
     Ce2 = Constant(1.92),
     sigma_e = Constant(1.3),
     sigma_k = Constant(1.0),
-    e_d = Constant(0.5))
+    e_d = Constant(0.0))
+
 vars().update(model_prm)
 
-# inlet = 1
 def jet(x, on_boundary): 
-    return on_boundary and  x[1] < R11 + DOLFIN_EPS_LARGE and x[0] < DOLFIN_EPS_LARGE
+    return on_boundary and  x[1] < R1 + 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
   
 def pilot(x, on_boundary): 
-    return on_boundary and  x[1] > R12 - DOLFIN_EPS_LARGE and x[1] < R21 + DOLFIN_EPS_LARGE and x[0] < DOLFIN_EPS_LARGE
+    return on_boundary and  x[1] > R1 - 10*DOLFIN_EPS_LARGE and x[1] < R2 + 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
 
 def coflow(x, on_boundary): 
-    return on_boundary and  x[1] > R22 - DOLFIN_EPS_LARGE and x[0] < DOLFIN_EPS_LARGE
+    return on_boundary and  x[1] > R2 - 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
       
-# outlet = 2
 def inlet(x, on_boundary): 
-    return on_boundary and x[0] < DOLFIN_EPS_LARGE
+    return on_boundary and x[0] < 10*DOLFIN_EPS_LARGE
 
 def outlet(x, on_boundary): 
-    return on_boundary and x[0] > L - DOLFIN_EPS_LARGE or x[1] > H - DOLFIN_EPS_LARGE
+    return on_boundary and x[0] > L - 10*DOLFIN_EPS_LARGE or x[1] > H - 10*DOLFIN_EPS_LARGE
 
 def centerline(x, on_boundary):
-    return on_boundary and x[1] < DOLFIN_EPS_LARGE
+    return on_boundary and x[1] < 10*DOLFIN_EPS_LARGE
 
 def border(x, on_boundary):
     return on_boundary and x[1] > H - 10*DOLFIN_EPS_LARGE
 
-class KEJet(Expression):
-    def __init__(self):
-        # Coefficients from Ahmad
-        # uu fit coefs
-        self.p1uu = 6.136e8
-        self.p2uu = -6.806e5
-        self.p3uu = 3681.0
-        self.p4uu = 5.467
+k_min = 0.5*cases[case]["U_coflow"]*cases[case]["U_coflow"]*0.005
+e_min = pow(Cmu(0), 0.75)*pow(k_min, 1.5) / (0.05)
 
-        # vv fit coefs
-        self.p1vv = -2.609e8
-        self.p2vv = 1.204e6
-        self.p3vv = -481.0
-        self.p4vv = 2.207
-  
-    def eval(self, values, x):
-        uu = 0; vv = 0
-        if x[1] <= R11:
-            uu = self.p1uu*pow(x[1],3.0) + self.p2uu*pow(x[1],2.0) + self.p3uu*x[1] + self.p4uu
-            vv = self.p1vv*pow(x[1],3.0) + self.p2vv*pow(x[1],2.0) + self.p3vv*x[1] + self.p4vv
-            values[0] = max(0.5*(uu + 2*vv), 0)
-        else:
-            values[0] = 0
-            
-        values[1] = pow(Cmu, 0.75)*pow(values[0], 1.5) / Lm
-        
-    def value_shape(self):
-        return (2,)
+# Set lower and upper limits for computations
+limits = {"k": (k_min/100, 500.),
+          "e": (e_min/100, 1e7),
+          "nut": (1e-6, 0.01),
+          "T": (1e-6, 1e3),
+          "ke": (k_min/100, 1e7)
+          }
 
-class LaminarPilot(Expression):
-    
-    def __init__(self):
-        self.C = C = (R1**2-R2**2)/log(R2/R1)
-        self.D = D = -C*log(R1)-R1**2
-        self.A = cases[case]['U_pilot'] / (0.25*(R2**4-R1**4) + 
-                                           0.25*C*(R2**2*(2*log(R2)-1) - R1**2*(2*log(R1)-1))
-                                           +0.5*D*(R2**2-R1**2)) * (0.5*(R2**2-R1**2))
-        
-    def eval(self, values, x):
-        values[0] = self.A*(x[1]*x[1]+self.C*log(x[1])+self.D)
-        values[1] = 0.0        
-        
-    def value_shape(self):
-        return (2,)
-    
-laminarjet = Expression(("U * (r*r-x[1]*x[1])", "0"), 
-                         U=2*cases[case]['U_jet']/R1**2, r=R1)
-
-one_over_seven_jet = Expression(("69.95*pow(1-x[1]/r, 1.0/7.0)", "0"), r=R1) 
-
-laminarpilot = LaminarPilot()
-constantpilot = Expression(("U", "0"), U=cases[case]['U_pilot'])
-constantcoflow = Expression(("U", "0"), U=cases[case]['U_coflow'])
-
-ke_jet = Expression(("0.5*(69.95*pow(1-x[1]/r, 1.0/7.0)*69.95*pow(1-x[1]/r, 1.0/7.0)*I)", 
-                     "c*pow(0.5*(69.95*pow(1-x[1]/r, 1.0/7.0)*69.95*pow(1-x[1]/r, 1.0/7.0)*I), 1.5) / L"), U=cases[case]['U_pilot'], I=0.01, L=0.0001, c=pow(Cmu(0), 0.75), r=R1)
-ke_pilot = Expression(("0.5*(U*U*I)", "c*pow(0.5*(U*U*I), 1.5) / L"), U=cases[case]['U_pilot'], I=0.01, L=0.0001, c=pow(Cmu(0), 0.75))
-ke_coflow = Expression(("0.5*(U*U*I)", "c*pow(0.5*(U*U*I), 1.5) / L"), U=cases[case]['U_coflow'], I=0.01, L=0.001, c=pow(Cmu(0), 0.75))
-
-V = VectorFunctionSpace(mesh, "CG", 2)
+# Define relevant function spaces
 Q = FunctionSpace(mesh, "CG", 1)
-DG = FunctionSpace(mesh, "DG", 0)
-VQ = MixedFunctionSpace([V, Q])
-KE = MixedFunctionSpace([Q, Q])
+DG0 = FunctionSpace(mesh, "DG", 0)
+DG1 = FunctionSpace(mesh, "DG", 1)
+if model == "TH":
+    V = VectorFunctionSpace(mesh, "CG", 2)
+    P = Q
+elif model == "CR":
+    V = VectorFunctionSpace(mesh, "CR", 1)
+    P = DG0
+    
+# Mixed function space for velocity pressure
+VQ = MixedFunctionSpace([V, P])
+
+# Cylindrical coordinate
 r = Expression("x[1]", domain=mesh)
+r_inv = Expression("x[1] > 1e-8 ? 1.0/x[1] : 0.0", domain=mesh)
+
 n = FacetNormal(mesh)
+h = CellSize(mesh)
+h_avg = (h('+') + h('-'))/2
 
 up = TrialFunction(VQ)
 vq = TestFunction(VQ)
 v, q = split(vq)
 u, p = split(up)
 
-# Turbulence
-nut_ = Function(DG)
-ke = TrialFunction(KE)
-kev = TestFunction(KE)
-v_k, v_e = split(kev)
-k, e = split(ke)
-tt = TrialFunction(DG) 
-tg = TestFunction(DG)
+up_ = Function(VQ, name="up")
+u_, p_ = split(up_)
 
-ke_ = Function(KE)
-dke = Function(KE)
-k_, e_ = split(ke_)
+# Turbulence
+if not coupled:
+    # Space for k and epsilon
+    TSpace = DG1 if runDG else Q
+    k = TrialFunction(TSpace)
+    v_k = TestFunction(TSpace)
+    e = TrialFunction(TSpace)
+    v_e = TestFunction(TSpace)
+
+    k_ = Function(TSpace, name="k")
+    e_ = Function(TSpace, name="e")
+
+else:
+    # Space for k and epsilon
+    TSpace = Q*Q
+    k, e = TrialFunctions(TSpace)
+    v_k, v_e = TestFunctions(TSpace)
+    ke_ = Function(TSpace, name="ke")
+    k_, e_ = split(ke_)
+    
+# Create some dictionaries to hold work matrices and functions
+class Mat_cache_dict(dict):
+    def __missing__(self, key):
+        A, sol = (assemble(key), LUSolver("mumps"))
+        sol.parameters["reuse_factorization"] = True
+        self[key] = (A, sol)
+        return self[key]
+
+class Fun_cache_dict(dict):
+    def __missing__(self, key):
+        self[key] = Function(key)
+        return self[key]
+
+A_cache = Mat_cache_dict()
+Fun_cache = Fun_cache_dict()
+
+def bound(x, low_lim=1e-8, upp_lim=1e8):
+    x.set_local(minimum(maximum(low_lim, x.array()), upp_lim))
+    x.apply("insert")
+
+class derived_quantity(Function):
+    
+    def __init__(self, name, Space, form, cyl=True, om=-1):
+        Function.__init__(self, Space, name=name)
+        self.form = form
+        ta, tg = TrialFunction(Space), TestFunction(Space)
+        if cyl: # update using r
+            Mass = ta*tg*r*dx()
+            bf = form*r*tg*dx()
+        else:
+            Mass = ta*tg*dx()
+            bf = form*tg*dx()
+        self.A, self.sol = A_cache[Mass]
+        self.bf = bf
+        self.b = Vector()
+        self.work = Function(Space)
+        self.om = omega[name] if om==-1 else om
+        
+    def update(self):
+        assemble(self.bf, tensor=self.b)
+        self.work.vector()[:] = self.vector()[:]
+        self.sol.solve(self.A, self.vector(), self.b)        
+        self.vector()._scale(self.om)
+        self.vector().axpy(1-self.om, self.work.vector())
+        bound(self.vector(), low_lim=limits[self.name()][0], upp_lim=limits[self.name()][1])
+                    
+# Define some derived quantities
+T_ = derived_quantity("T", DG0, k_*(1/e_), cyl=False)    
+T = T_.form
+
+nut_ = derived_quantity("nut", DG0, Cmu * k_ * k_ / e_, cyl=False)
+nut = nut_.form
+
+P_ = Pr_ = derived_quantity("P", DG0, 2*nut_*inner(sym(grad(u_)), sym(grad(u_)))*r+2*nut_*u_[1]*u_[1]*r_inv, cyl=False)
+Pr = Pr_.form
 
 # Create effective viscosity - the sum of viscosity and turbulent viscosity
-nut = nu + nut_
-up_ = Function(VQ)
-u_, p_ = split(up_)
-dup = Function(VQ)
+# CellSize is added to mimick the effect of upwinding
+nutt = nu + nut_ + CellSize(mesh)*Constant(beta)
+nute = nu + nut_*(1./sigma_e) + CellSize(mesh)*Constant(beta)
+
+#vv = v + h*dot(grad(v), u_)
+vv = v
 
 #bc0 = DirichletBC(VQ.sub(0), one_over_seven_jet,  jet)
 #bc1 = DirichletBC(VQ.sub(0), constantpilot,  pilot)
@@ -189,189 +271,231 @@ bcin = DirichletBC(VQ.sub(0), uin, inlet)
 bc3 = DirichletBC(VQ.sub(0).sub(1), 0, centerline)
 bc4 = DirichletBC(VQ.sub(0).sub(1), 0, border)
 #bcs = [bc0, bc1, bc2, bc3]
-bcs = [bcin, bc3, bc4]
+
+bcs = {}
+bcs['up'] = [bcin, bc3, bc4]
 
 # Variational form of Navier-Stokes in cylinder coordinates
-NS = inner(dot(grad(u_), u_), v)*r*dx() \
-     + 2*nut*inner(sym(grad(u_)), grad(v))*r*dx() + nut*u_[1]*v[1]/r*dx() \
-     - inner(p_, (r*v [1]).dx(1) + r*v [0].dx(0))*dx() \
-     - inner(q , (r*u_[1]).dx(1) + r*u_[0].dx(0))*dx() \
-     - nut*inner(dot(grad(u_).T, n), v)*ds()
+U = 0.5*(u+u_)
+NS =(inner(dot(grad(u_), u_), vv)*r*dx()
+     + 2*nutt*inner(sym(grad(u_)), grad(vv))*r*dx() 
+     + 2*nutt*u_[1]*vv[1]/r*dx()
+     - inner(p_, (r*div(v) +v [1]))*dx()
+     - inner(q , (r*div(u_)+u_[1]))*dx()
+     - nutt*inner(dot(grad(u_).T, n), vv)*r*ds() )
+
+# Picard
+NS_P =(inner(dot(grad(u), u_), vv)*r*dx()
+     + 2*nutt*inner(sym(grad(u)), grad(vv))*r*dx() 
+     + 2*nutt*u[1]*vv[1]/r*dx()
+     - inner(p, (r*div(v)+v[1]))*dx()
+     - inner(q, (r*div(u)+u[1]))*dx()
+     - nutt*inner(dot(grad(u).T, n), vv)*r*ds() 
+     + inner(Constant((0, 0)), vv)*dx() )
 
 J = derivative(NS, up_, up)
 up_sol = LUSolver("mumps")
 up_sol.parameters["same_nonzero_pattern"] = True
-A = Matrix()
-b = Vector(up_.vector())
 
-P_form = 2*inner(grad(u_), sym(grad(u_)))*nut_
-
-P_ = Function(DG)
-#P_ = P_form
-
-Fk = nut*inner(grad(v_k), grad(k_))*r*dx() + nut*inner(v_k, k_.dx(1))*dx() \
-   + inner(v_k, dot(grad(k_), u_))*r*dx() \
-   - P_*v_k*r*dx() + e_*v_k*r*dx()
-        
-Fe = (nu + nut_*(1./sigma_e))*inner(grad(v_e), grad(e_))*r*dx() \
-        + (nu + nut_*(1./sigma_e))*inner(v_e, e_.dx(1))*dx() \
-        + inner(v_e, dot(grad(e_), u_))*r*dx() \
-        - (Ce1*P_ - Ce2*e_)*(e_/k_)*v_e*r*dx()
-
-#h = mesh.hmin()
-#vvk = v_k + h*dot(grad(v_k), u_)
-#vve = v_e + h*dot(grad(v_e), u_)
 vvk = v_k
 vve = v_e
 
-Fk_P = nut*inner(grad(vvk), grad(k))*r*dx() + nut*inner(vvk, k.dx(1))*dx() \
-   + inner(vvk, dot(grad(k), u_))*r*dx() \
-   - P_*vvk*r*dx() + e*vvk*r*dx()
-   #- P_*vvk*r*dx() + (k_*e*e_d + k*e_*(1. - e_d))*Max(1./k_, 1e-6)*vvk*r*dx()
-        
-Fe_P = (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
-        + (nu + nut_*(1./sigma_e))*inner(vve, e.dx(1))*dx() \
-        + inner(vve, dot(grad(e), u_))*r*dx() \
-        - (Ce1*P_ - Ce2*e)*Max(e_/k_, 1e-6)*vve*r*dx()
+un = (dot(u_, n) + abs(dot(u_, n)))/2.0
+# Penalty term
+alpha = Constant(5000.0)
 
-Fke_P = Fk_P + Fe_P
+if runDG:
+    Fke = { "k": dot(grad(v_k), nutt*grad(k) - u_*k)*r*dx \
+            +avg(nutt)*(alpha/h('+'))*dot(jump(v_k, n), jump(k, n))*avg(r)*dS \
+            -avg(nutt)*dot(avg(grad(v_k)), jump(k, n))*avg(r)*dS \
+            -avg(nutt)*dot(jump(v_k, n), avg(grad(k)))*avg(r)*dS \
+            +dot(jump(v_k), un('+')*k('+') - un('-')*k('-') )*avg(r)*dS  \
+            +dot(v_k, un*k)*r*ds \
+            -P_*v_k*r*dx() + k*e_/k_ *v_k*r*dx(),           
+         
+        "e": dot(grad(v_e), nute*grad(e) - u_*e)*r*dx \
+            +avg(nute)*(alpha/h('+'))*dot(jump(v_e, n), jump(e, n))*avg(r)*dS 
+            -avg(nute)*dot(avg(grad(v_e)), jump(e, n))*avg(r)*dS \
+            -avg(nute)*dot(jump(v_e, n), avg(grad(e)))*avg(r)*dS \
+            +dot(jump(v_e), un('+')*e('+') - un('-')*e('-') )*avg(r)*dS  \
+            +dot(v_e, un*e)*r*ds \
+            - (Ce1*P_ - Ce2*e)*e_/k_*v_e*r*dx()
+            
+         }
+else:
+    Fke = { "k": nutt*inner(grad(vvk), grad(k))*r*dx() \
+             + inner(vvk, dot(grad(k), u_))*r*dx() \
+             - Pr*vvk*dx() + k*e_/k_*vvk*r*dx(),
+         
+        "e": (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
+             + inner(vve, dot(grad(e), u_))*r*dx() \
+             - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx(),
+         
+        "ke": nutt*inner(grad(vvk), grad(k))*r*dx() \
+             + inner(vvk, dot(grad(k), u_))*r*dx() \
+             - Pr*vvk*dx() + e*vvk*r*dx() \
+             + (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
+             + inner(vve, dot(grad(e), u_))*r*dx() \
+             - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx()
+         }
 
-Fke = Fk + Fe
-Jke = derivative(Fke, ke_, ke)
-Ake = Matrix()
+A = defaultdict(lambda : Matrix())
+b = defaultdict(lambda : Vector())
 
-F_nut = (tt*tg - Max(Cmu * k_ * k_ / e_, 1e-4) * tg) * dx()
-F_Prod = (tt*tg - P_form * tg) * dx()
-A_nut = assemble(lhs(F_nut))
+uin0 = interpolate(uin0, Q)
+class k_in(Expression):
+    def eval(self, values, x):
+        intensity = 0.01 if x[1] < R2 else 0.005
+        values[0] = 0.5*pow(uin0(x), 2)*intensity
 
-#bc4 = DirichletBC(KE, KEJet(),  jet)
-bc4 = DirichletBC(KE, ke_jet,  jet)
-bc5 = DirichletBC(KE, ke_pilot,  pilot)
-bc6 = DirichletBC(KE, ke_coflow,  coflow)
-bcs_ke = [bc4, bc5, bc6]
+class e_in(Expression):
+    def eval(self, values, x):
+        kk = 0.5*pow(uin0(x), 2)*0.01
+        if x[1] < R1 and x[0] < 10*DOLFIN_EPS_LARGE:
+            values[0] = pow(Cmu(0), 0.75)*pow(kk, 1.5) / (0.001)
+        elif x[1] < R2 and x[0] < 10*DOLFIN_EPS_LARGE:
+            values[0] = pow(Cmu(0), 0.75)*pow(kk, 1.5) / (0.0025)
+        else:
+            values[0] = e_min
 
-nut_sol = LUSolver("mumps")
-nut_sol.parameters["reuse_factorization"] = True
-x = Vector(nut_.vector())
+class ke_in(Expression):
+    def eval(self, values, x):
+        intensity = 0.01 if x[1] < R2 else 0.005
+        values[0] = 0.5*pow(uin0(x), 2)*intensity
+        if x[1] < R1 and x[0] < 10*DOLFIN_EPS_LARGE:
+            values[1] = pow(Cmu(0), 0.75)*pow(values[0], 1.5) / (0.001)
+        elif x[1] < R2 and x[0] < 10*DOLFIN_EPS_LARGE:
+            values[1] = pow(Cmu(0), 0.75)*pow(values[0], 1.5) / (0.0025)
+        else:
+            values[1] = e_min
+
+    def value_shape(self):
+        return (2,)
+
+if coupled:
+    bcs["ke"] = [DirichletBC(TSpace, ke_in(), inlet, "geometric")]
+else:
+    bcs["k"] = [DirichletBC(TSpace, k_in(), inlet, "geometric"), 
+                DirichletBC(TSpace, k_min, border, "geometric")]
+    bcs["e"] = [DirichletBC(TSpace, e_in(), inlet, "geometric"), 
+                DirichletBC(TSpace, e_min, border, "geometric")]
+    
+bcs["nut"] = []
+bcs["T"] = []
+bcs["P"] = []
+
+q_ = {"up": up_, "k": k_, "e": e_, "nut": nut_, "P": P_, "T": T_}
+x_ = {"up":up_.vector(), "nut": nut_.vector(), "P": P_.vector(), "T": T_.vector()}
+if coupled:
+    x_.update({"ke": ke_.vector()})
+    q_["ke"] = ke_
+else:
+    x_.update({"k": k_.vector(), "e": e_.vector()})
 
 ke_sol = LUSolver("mumps")
 ke_sol.parameters["same_nonzero_pattern"] = True
-omega_nut = 0.1
-omega_prod = 0.1
-omega_ke = 0.2
-omega = 0.2
+    
+def velocity_iter_Newton(om=-1):
+    # Newton iteration for steady flow
+    assemble(J, tensor=A["up"])
+    for bc in bcs["up"]:
+        bc.apply(A["up"])
 
-turb_dofs = [KE.sub(0).dofmap().dofs(),
-             KE.sub(1).dofmap().dofs()]
+    om = omega["up"] if om==-1 else om
+    func = Fun_cache[VQ]
+    func.vector().zero()
+    up_sol.solve(A["up"], func.vector(), b["up"])
+    up_.vector().axpy(-om, func.vector())
+    up_.vector().apply("insert")     
+    
+    assemble(NS, tensor=b["up"])
+    for bc in bcs['up']:
+        bc.apply(b["up"], up_.vector())
 
-def solve_nut(omega_nut):
-    b_nut = assemble(rhs(F_nut))
-    nut_sol.solve(A_nut, x, b_nut)
-    x.axpy(-1, nut_.vector())
-    nut_.vector().axpy(omega_nut, x)
-    nut_.vector().set_local(minimum(maximum(1e-4, nut_.vector().array()), 1.0))
+    return b["up"].norm('l2') 
 
-def solve_Prod(omega_prod):
-    b_prod = assemble(rhs(F_Prod))
-    nut_sol.solve(A_nut, x, b_prod)
-    x.axpy(-1, P_.vector())
-    P_.vector().axpy(omega_prod, x)
-    P_.vector().set_local(minimum(maximum(1e-4, P_.vector().array()), 1.e8))
+def velocity_iter_Picard(om=-1):
+    # Newton iteration for steady flow
+    assemble(lhs(NS_P), tensor=A["up"])
+    assemble(rhs(NS_P), tensor=b["up"])
+    for bc in bcs['up']:
+        bc.apply(A["up"], b["up"])
 
-def velocity_iter(A, b, omega):
+    om = omega["up"] if om==-1 else om
+    func = Fun_cache[VQ]
+    func.vector().zero()
+    up_sol.solve(A["up"], func.vector(), b["up"])
+    func.vector().axpy(-1., up_.vector())
+    up_.vector().axpy(om, func.vector())    
+
+    return func.vector().norm("l2") / up_.vector().norm("l2")
+
+def ke_iter_Picard(comp, om=-1):
     # Newton iterations for steady flow
-    A = assemble(J, tensor=A)
-    for bc in bcs:
-        bc.apply(A)
+        
+    assemble(lhs(Fke[comp]), tensor=A[comp])
+    assemble(rhs(Fke[comp]), tensor=b[comp])
+    for bc in bcs[comp]:
+        bc.apply(A[comp], b[comp])
 
-    dup.vector().zero()
-    up_sol.solve(A, dup.vector(), b)
-    up_.vector().axpy(-omega, dup.vector())
-    
-    b = assemble(NS, tensor=b)
-    for bc in bcs:
-        bc.apply(b, up_.vector())
-
-    return b.norm('l2') 
-
-def ke_iter_Newton(Ake, bke, omega_ke):
-    # Newton iterations for steady flow
-    error = 1
-    Ake = assemble(Jke, tensor=Ake)
-    for bc in bcs_ke:
-        bc.apply(Ake)
-
-    dke.vector().zero()
-    ke_sol.solve(Ake, dke.vector(), bke)
-    ke_.vector().axpy(-omega_ke, dke.vector())
-    
-    # Enforce lower and upper boundary
-    xa = ke_.vector().array()
-    ke_.vector().set_local(minimum(maximum(1e-10, xa), 1e8))
-    
-    bke = assemble(Fke, tensor=bke)
-    for bc in bcs_ke:
-        bc.apply(bke, ke_.vector())
-
-    return bke.norm('l2') 
-
-def ke_iter_Picard(Ake, bke, omega_ke):
-    # Newton iterations for steady flow
-    error = 1
-    Ake = assemble(lhs(Fke_P), tensor=Ake)
-    bke = assemble(rhs(Fke_P), tensor=bke)
-    for bc in bcs_ke:
-        bc.apply(Ake, bke)
-
-    #dke.vector()[:] = ke_.vector()[:]
-    ke_sol.solve(Ake, dke.vector(), bke)
-    err = dke.vector() - ke_.vector()
-    dke.vector().axpy(-1., ke_.vector())
-    ke_.vector().axpy(omega_ke, dke.vector())    
-    
-    # Enforce lower and upper boundary
-    xa = ke_.vector().array()
-    ke_.vector().set_local(minimum(maximum(1e-10, xa), 1e8))   
-    
-    return err.norm('l2')
-    
-# init u
-# Assemble rhs once, before entering iterations (velocity components)
-# initialize nut_
-nut_.vector()[:] = 0.1
-
-for bc in bcs:
-    bc.apply(up_.vector())
-b = assemble(NS)
-for bc in bcs:
-    bc.apply(b, up_.vector())
-error = velocity_iter(A, b, 1.0)
+    om = omega[comp] if om==-1 else om
+    dk = Fun_cache[TSpace]
+    dk.vector().zero()
+    ke_sol.solve(A[comp], dk.vector(), b[comp])
+    bound(dk.vector(), low_lim=limits[comp][0], upp_lim=limits[comp][1])
+    dk.vector().axpy(-1., x_[comp])
+    x_[comp].axpy(om, dk.vector())    
+        
+    return dk.vector().norm("l2") / x_[comp].norm("l2")
 
 # init ke
-k0 = project(0.01*dot(u_, u_), Q)
-ke_.vector()[turb_dofs[0]] = k0.vector()[:]
-ke_.vector().set_local(minimum(maximum(1e-10, ke_.vector().array()), 1e8))
-e0 = project(pow(Cmu, 0.75)*pow(k_, 1.5)/0.001, Q)
-ke_.vector()[turb_dofs[1]] = e0.vector()[:]
-ke_.vector().set_local(minimum(maximum(1e-10, ke_.vector().array()), 1e8))
-#solve_nut(1.0)
+if coupled:
+    x_["ke"][TSpace.sub(0).dofmap().dofs()] = k_min
+    x_["ke"][TSpace.sub(1).dofmap().dofs()] = e_min
+else:
+    x_["k"][:] = k_min
+    x_["e"][:] = e_min
+#x_["nut"][:] = Cmu(0)*k_min*k_min/e_min
+x_["nut"][:] = 0.01
+x_["T"][:] = k_min/e_min
+x_["P"][:] = 0
 
-for bc in bcs_ke:
-    bc.apply(ke_.vector())    
-bke = assemble(Fke)
-for bc in bcs_ke:
-    bc.apply(bke, ke_.vector())
+b["up"] = assemble(NS)
+for bc in bcs["up"]:
+    bc.apply(up_.vector())
+    bc.apply(b["up"], up_.vector())
+
+if not coupled:
+    for name in ["k", "e"]:
+        for bc in bcs[name]:
+            bc.apply(x_[name])    
+else:
+    for bc in bcs["ke"]:
+        bc.apply(x_["ke"])
 
 def iterate(max_iters=100):
     iter = 0
     error = 1
     while iter < max_iters and error > 1e-6: 
-        error = velocity_iter(A, b, omega)
-        solve_Prod(omega_prod)
-        #error_ke = ke_iter_Newton(Ake, bke, omega_ke)
-        error_ke = ke_iter_Picard(Ake, bke, omega_ke)        
-        solve_nut(omega_nut)
-        iter += 1
-        print iter, " ", error, error_ke
+        error = velocity_iter_Picard()
+        #error = velocity_iter_Newton()
+        #update(P_, P, bc=bcs["P"], regular=False)
+        
+        if coupled:
+            error_k = ke_iter_Picard("ke")
+            error_e = 0
+            
+        else:
+            error_k = ke_iter_Picard("k")        
+            
+            nut_.update()
+            
+            error_e = ke_iter_Picard("e")
+                
+        nut_.update()
 
-iterate()
+        iter += 1
+        print "{0:5d} {1:2.5e} {2:2.5e} {3:2.5e} {4:2.5e} ".format(iter, error, error_k, error_e, nut_.vector().norm("l2"))
+        error = max(error, max(error_k, error_e))
+
+iterate(max_iters)
