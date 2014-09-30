@@ -23,18 +23,19 @@ params = dict(
     R2 = 9.1e-3,  # Outer radius pilot
     H = 0.15,     # Length of mesh
     L = 0.4,      # Height of mesh
-    cl4 = 0.0015, # Mesh density (L, 0)
+    cl4 = 0.001, # Mesh density (L, 0)
     cl3 = 0.005,  # Mesh density (L, H)
     cl2 = 0.005,  # Mesh density (0, H)
     cl1 = 0.0001, # Mesh density (0, 0)
     case = "D",
     model = "CR", #Velocity-pressure function spaces
-    beta = 0.25,  # Numerical stability parameter
+    beta = 0.01,  # Numerical stability parameter
     runDG = False,# DG model or not (experimental)
     nu = Constant(1.58e-5),
-    max_error = 1e-6,
+    max_error = 1e-7,
     coupled = False,
-    max_iters = 200
+    max_iters = 200,
+    sigma = 0.00075 # Parameter used to create smooth inlet profiles. Lower value -> sharper Heaviside = less stable
 )
 
 # Any parameter may be overloaded on command line
@@ -102,12 +103,6 @@ cases = {
             'U_coflow': 0.9}
       }
 
-uin = Expression(("0.5*(1.0+erf((R1-x[1])/0.001))*Uj + Uc + (1.0-Uc)*0.5*(1+erf((R2-x[1])/0.001))*(Up-Uc)", "0"),
-                 R1=R1, R2=R2, Up=cases[case]["U_pilot"], Uc=cases[case]["U_coflow"], Uj=cases[case]["U_jet"])
-
-uin0 = Expression("0.5*(1.0+erf((R1-x[1])/0.001))*Uj + Uc + (1.0-Uc)*0.5*(1+erf((R2-x[1])/0.001))*(Up-Uc)",
-                 R1=R1, R2=R2, Up=cases[case]["U_pilot"], Uc=cases[case]["U_coflow"], Uj=cases[case]["U_jet"])
-
 # k-epsilon model coefficients
 model_prm = dict(
     Cmu = Constant(0.09),
@@ -117,7 +112,30 @@ model_prm = dict(
     sigma_k = Constant(1.0),
     e_d = Constant(0.0))
 
-vars().update(model_prm)
+vars().update(model_prm)      
+
+k_inlet = {"k_jet": 0.5*pow(cases[case]["U_jet"], 2)*0.01,
+           "k_pilot": 0.5*pow(cases[case]["U_pilot"], 2)*0.01,
+           "k_coflow": 0.5*pow(cases[case]["U_coflow"], 2)*0.005}
+
+e_inlet = {"e_jet": pow(Cmu(0), 0.75)*pow(k_inlet["k_jet"], 1.5) / 0.001,
+           "e_pilot": pow(Cmu(0), 0.75)*pow(k_inlet["k_pilot"], 1.5) / 0.0025,
+           "e_coflow": pow(Cmu(0), 0.75)*pow(k_inlet["k_coflow"], 1.5) / 0.05}
+
+smoothinlet = "0.5*(1.0+erf((R1-x[1])/sigma))*jet + cof + (1.0-cof)*0.5*(1+erf((R2-x[1])/sigma))*(pilot-cof)"
+
+uin = Expression((smoothinlet, "0"), R1=R1, R2=R2, pilot=cases[case]["U_pilot"],
+                 cof=cases[case]["U_coflow"], jet=cases[case]["U_jet"], sigma=sigma)
+
+uin0 = Expression(smoothinlet, R1=R1, R2=R2, pilot=cases[case]["U_pilot"],
+                 cof=cases[case]["U_coflow"], jet=cases[case]["U_jet"], sigma=sigma)
+
+kin = Expression(smoothinlet, R1=R1, R2=R2, pilot=k_inlet["k_pilot"],
+                 cof=k_inlet["k_coflow"], jet=k_inlet["k_jet"], sigma=sigma)
+
+ein = Expression(smoothinlet, R1=R1, R2=R2, pilot=e_inlet["e_pilot"], 
+                 cof=e_inlet["e_coflow"], jet=e_inlet["e_jet"], sigma=sigma)
+
 
 def jet(x, on_boundary): 
     return on_boundary and  x[1] < R1 + 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
@@ -140,16 +158,15 @@ def centerline(x, on_boundary):
 def border(x, on_boundary):
     return on_boundary and x[1] > H - 10*DOLFIN_EPS_LARGE
 
-k_min = 0.5*cases[case]["U_coflow"]*cases[case]["U_coflow"]*0.005
-e_min = pow(Cmu(0), 0.75)*pow(k_min, 1.5) / (0.05)
+k_min = k_inlet["k_coflow"]
+e_min = e_inlet["e_coflow"]
 
 # Set lower and upper limits for computations
 limits = {"k": (k_min/100, 500.),
           "e": (e_min/100, 1e7),
           "nut": (1e-6, 0.01),
           "T": (1e-6, 1e3),
-          "ke": (k_min/100, 1e7)
-          }
+          "ke": (k_min/100, 1e7)}
 
 # Define relevant function spaces
 Q = FunctionSpace(mesh, "CG", 1)
@@ -157,13 +174,13 @@ DG0 = FunctionSpace(mesh, "DG", 0)
 DG1 = FunctionSpace(mesh, "DG", 1)
 if model == "TH":
     V = VectorFunctionSpace(mesh, "CG", 2)
-    P = Q
+    S = Q
 elif model == "CR":
     V = VectorFunctionSpace(mesh, "CR", 1)
-    P = DG0
+    S = DG0
     
-# Mixed function space for velocity pressure
-VQ = MixedFunctionSpace([V, P])
+# Mixed function space for velocity and pressure
+VQ = MixedFunctionSpace([V, S])
 
 # Cylindrical coordinate
 r = Expression("x[1]", domain=mesh)
@@ -222,7 +239,8 @@ def bound(x, low_lim=1e-8, upp_lim=1e8):
     x.apply("insert")
 
 class derived_quantity(Function):
-    
+    """Derived Function with update method for underrelaxation
+    """
     def __init__(self, name, Space, form, cyl=True, om=-1):
         Function.__init__(self, Space, name=name)
         self.form = form
@@ -248,6 +266,8 @@ class derived_quantity(Function):
         bound(self.vector(), low_lim=limits[self.name()][0], upp_lim=limits[self.name()][1])
                     
 # Define some derived quantities
+# These may be used either as Function or as form. 
+# Using it as a Function one may apply underrelaxation
 T_ = derived_quantity("T", DG0, k_*(1/e_), cyl=False)    
 T = T_.form
 
@@ -258,7 +278,7 @@ P_ = Pr_ = derived_quantity("P", DG0, 2*nut_*inner(sym(grad(u_)), sym(grad(u_)))
 Pr = Pr_.form
 
 # Create effective viscosity - the sum of viscosity and turbulent viscosity
-# CellSize is added to mimick the effect of upwinding
+# A minimum of CellSize is added for stability. This mimicks the effect of upwinding
 nutt = nu + nut_ + CellSize(mesh)*Constant(beta)
 nute = nu + nut_*(1./sigma_e) + CellSize(mesh)*Constant(beta)
 
@@ -298,6 +318,8 @@ J = derivative(NS, up_, up)
 up_sol = LUSolver("mumps")
 up_sol.parameters["same_nonzero_pattern"] = True
 
+#vvk = mesh.hmin()*dot(grad(v_k), u_)
+#vve = mesh.hmin()*dot(grad(v_e), u_)
 vvk = v_k
 vve = v_e
 
@@ -339,7 +361,7 @@ else:
              + inner(vve, dot(grad(e), u_))*r*dx() \
              - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx()
          }
-
+        
 A = defaultdict(lambda : Matrix())
 b = defaultdict(lambda : Vector())
 
@@ -376,9 +398,9 @@ class ke_in(Expression):
 if coupled:
     bcs["ke"] = [DirichletBC(TSpace, ke_in(), inlet, "geometric")]
 else:
-    bcs["k"] = [DirichletBC(TSpace, k_in(), inlet, "geometric"), 
+    bcs["k"] = [DirichletBC(TSpace, kin, inlet, "geometric"), 
                 DirichletBC(TSpace, k_min, border, "geometric")]
-    bcs["e"] = [DirichletBC(TSpace, e_in(), inlet, "geometric"), 
+    bcs["e"] = [DirichletBC(TSpace, ein, inlet, "geometric"), 
                 DirichletBC(TSpace, e_min, border, "geometric")]
     
 bcs["nut"] = []
@@ -431,9 +453,11 @@ def velocity_iter_Picard(om=-1):
 
     return func.vector().norm("l2") / up_.vector().norm("l2")
 
+count=0
 def ke_iter_Picard(comp, om=-1):
     # Newton iterations for steady flow
-        
+    global count
+    
     assemble(lhs(Fke[comp]), tensor=A[comp])
     assemble(rhs(Fke[comp]), tensor=b[comp])
     for bc in bcs[comp]:
@@ -446,10 +470,16 @@ def ke_iter_Picard(comp, om=-1):
     bound(dk.vector(), low_lim=limits[comp][0], upp_lim=limits[comp][1])
     dk.vector().axpy(-1., x_[comp])
     x_[comp].axpy(om, dk.vector())    
-        
+    
+    if comp == "e":
+        count += 1
+        if count % 10 == 0:
+            plot(q_[comp])
+            plot(dk, title="Error in e")
+            
     return dk.vector().norm("l2") / x_[comp].norm("l2")
 
-# init ke
+# initialize solution
 if coupled:
     x_["ke"][TSpace.sub(0).dofmap().dofs()] = k_min
     x_["ke"][TSpace.sub(1).dofmap().dofs()] = e_min
@@ -461,23 +491,20 @@ x_["nut"][:] = 0.01
 x_["T"][:] = k_min/e_min
 x_["P"][:] = 0
 
+# For Newton iterations following is required. For Picard it doesn't hurt
 b["up"] = assemble(NS)
 for bc in bcs["up"]:
-    bc.apply(up_.vector())
     bc.apply(b["up"], up_.vector())
 
-if not coupled:
-    for name in ["k", "e"]:
-        for bc in bcs[name]:
-            bc.apply(x_[name])    
-else:
-    for bc in bcs["ke"]:
-        bc.apply(x_["ke"])
-
+# Apply boundary conditions to get the true solution on the boundary
+for name, val in bcs.iteritems():
+    for bc in val:
+        bc.apply(x_[name])    
+            
 def iterate(max_iters=100):
     iter = 0
     error = 1
-    while iter < max_iters and error > 1e-6: 
+    while iter < max_iters and error > max_error: 
         error = velocity_iter_Picard()
         #error = velocity_iter_Newton()
         #update(P_, P, bc=bcs["P"], regular=False)
