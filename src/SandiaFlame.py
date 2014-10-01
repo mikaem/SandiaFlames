@@ -24,22 +24,21 @@ params = dict(
     R2 = 9.1e-3,  # Outer radius pilot
     H = 0.15,     # Length of mesh
     L = 0.4,      # Height of mesh
-    cl4 = 0.001, # Mesh density (L, 0)
+    cl4 = 0.002,  # Mesh density (L, 0)
     cl3 = 0.003,  # Mesh density (L, H)
     cl2 = 0.003,  # Mesh density (0, H)
     cl1 = 0.0001, # Mesh density (0, 0)
     case = "D",
-    model = "CR", #Velocity-pressure function spaces
-    beta = 0.01,  # Numerical stability parameter (artificial viscosity = beta * meshsize)
-    runDG = False,# DG model or not (experimental)
+    velocity_pressure_model = "CR", #Velocity-pressure function spaces
+    beta = 0.015,  # Numerical stability parameter (artificial viscosity = beta * meshsize)
     nu = Constant(1.58e-5),
     max_error = 1e-7,
     coupled = False,
     max_iters = 200,
-    sigma = 0.00075 # Parameter used to create smooth inlet profiles. Lower value -> sharper Heaviside = less stable
+    sigma = defaultdict(lambda : 0.00075, {"mf": 0.0001, "var": 0.0001}),  # Parameter used to create smooth inlet profiles. Lower value -> sharper Heaviside = less stable
 )
 
-# Any parameter may be overloaded on command line
+# Any parameter may be overloaded on command line. Read them here
 commandline_kwargs = {}
 for s in sys.argv[1:]:
     if s.count('=') == 1:
@@ -55,6 +54,8 @@ for s in sys.argv[1:]:
         params[key] = value
     else:
         commandline_kwargs[key] = value
+
+params.update(commandline_kwargs)
 
 # Create a Gmsh-mesh and load it
 meshcode = """
@@ -85,24 +86,8 @@ if not os.path.isfile("../mesh/Sandia.xml") or ("remesh" in commandline_kwargs
 
 mesh = Mesh("../mesh/Sandia.xml")
 
-vars().update(params)
-vars().update(commandline_kwargs)
-
-Lm = 2*0.07*R1
-
 # Underrelaxation factors
 omega = defaultdict(lambda : 0.8, {"nut": 0.8})
-
-##
-cases = {
-      "C": {'jet': 29.7, # m/s
-            'pilot': 6.8,
-            'coflow': 0.9},
-      
-      "D": {'jet': 49.6,
-            'pilot': 11.4,
-            'coflow': 0.9}
-      }
 
 # k-epsilon model coefficients
 model_prm = dict(
@@ -113,60 +98,66 @@ model_prm = dict(
     sigma_k = Constant(1.0),
     e_d = Constant(0.0))
 
-vars().update(model_prm)      
+params.update(model_prm)
+vars().update(params)      
 
-k_inlet = {"jet": 0.5*pow(cases[case]["jet"], 2)*0.01,
-           "pilot": 0.5*pow(cases[case]["pilot"], 2)*0.01,
-           "coflow": 0.5*pow(cases[case]["coflow"], 2)*0.005}
+# Create Expressions for specifying inlet conditions
+inletvalues = {
+    "u": 
+    {
+        "C": {"jet": 29.7, # m/s
+              "pilot": 6.8,
+              "coflow": 0.9},
+        
+        "D": {"jet": 49.6,
+              "pilot": 11.4,
+              "coflow": 0.9}
+    }[case]
+}
 
-e_inlet = {"jet": pow(Cmu(0), 0.75)*pow(k_inlet["jet"], 1.5) / 0.001,
-           "pilot": pow(Cmu(0), 0.75)*pow(k_inlet["pilot"], 1.5) / 0.0025,
-           "coflow": pow(Cmu(0), 0.75)*pow(k_inlet["coflow"], 1.5) / 0.05}
+inletvalues.update(
+{
+    "k": {"jet": 0.5*pow(inletvalues["u"]["jet"], 2)*0.01,
+          "pilot": 0.5*pow(inletvalues["u"]["pilot"], 2)*0.01,
+          "coflow": 0.5*pow(inletvalues["u"]["coflow"], 2)*0.005}
+})
+    
+inletvalues.update(
+{
+    "e": {"jet": pow(Cmu(0), 0.75)*pow(inletvalues["k"]["jet"], 1.5) / 0.001,
+          "pilot": pow(Cmu(0), 0.75)*pow(inletvalues["k"]["pilot"], 1.5) / 0.0025,
+          "coflow": pow(Cmu(0), 0.75)*pow(inletvalues["k"]["coflow"], 1.5) / 0.05},
 
-mf_inlet = {"jet": 1, "pilot": 0.25, "coflow": 0}
-var_inlet = {"jet": 1, "pilot": 0.0625, "coflow": 0}
+    "mf":  {"jet": 1, "pilot": 0.25  , "coflow": 0},
+    
+    "var": {"jet": 1, "pilot": 0.0625, "coflow": 0}
+})    
+    
+k_min = inletvalues["k"]["coflow"]
+e_min = inletvalues["e"]["coflow"]
 
-#smoothinlet = "0.5*(1.0+erf((R1-x[1])/sigma))*{0} + {2} + (1.0-{2})*0.5*(1+erf((R2-x[1])/sigma))*({1}-{2})"
-smoothinlet = "{2}+0.5*(1.0+erf((R1-x[1])/sigma))*({0}-{1}) + 0.5*(1+erf((R2-x[1])/sigma))*({1}-{2})"
-
-usmooth = smoothinlet.format(cases[case]["jet"], cases[case]["pilot"], cases[case]["coflow"])
-ksmooth = smoothinlet.format(k_inlet["jet"], k_inlet["pilot"], k_inlet["coflow"])
-esmooth = smoothinlet.format(e_inlet["jet"], e_inlet["pilot"], e_inlet["coflow"])
-mfsmooth = smoothinlet.format(mf_inlet["jet"], mf_inlet["pilot"], mf_inlet["coflow"])
-varsmooth = smoothinlet.format(var_inlet["jet"], var_inlet["pilot"], var_inlet["coflow"])
-
-uin = Expression((usmooth, "0"), R1=R1, R2=R2, sigma=sigma)
-
-uin0 = Expression(usmooth, R1=R1, R2=R2, sigma=sigma)
-kin = Expression(ksmooth, R1=R1, R2=R2, sigma=sigma)
-ein = Expression(esmooth, R1=R1, R2=R2, sigma=sigma)
-kein = Expression((ksmooth, esmooth), R1=R1, R2=R2, sigma=sigma)
-mfin = Expression(mfsmooth, R1=R1, R2=R2, sigma=0.0002)
-varin = Expression(varsmooth, R1=R1, R2=R2, sigma=0.0002)
-
+# Define inside functions for boundaries
+tol = 10*DOLFIN_EPS_LARGE
 def jet(x, on_boundary): 
-    return on_boundary and  x[1] < R1 + 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
+    return on_boundary and  x[1] < R1 + tol and x[0] < tol
   
 def pilot(x, on_boundary): 
-    return on_boundary and  x[1] > R1 - 10*DOLFIN_EPS_LARGE and x[1] < R2 + 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
+    return on_boundary and  x[1] > R1 - tol and x[1] < R2 + tol and x[0] < tol
 
 def coflow(x, on_boundary): 
-    return on_boundary and  x[1] > R2 - 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
+    return on_boundary and  x[1] > R2 - tol and x[0] < tol
       
 def inlet(x, on_boundary): 
-    return on_boundary and x[0] < 10*DOLFIN_EPS_LARGE
+    return on_boundary and x[0] < tol
 
 def outlet(x, on_boundary): 
-    return on_boundary and x[0] > L - 10*DOLFIN_EPS_LARGE or x[1] > H - 10*DOLFIN_EPS_LARGE
+    return on_boundary and x[0] > L - tol or x[1] > H - tol
 
 def centerline(x, on_boundary):
-    return on_boundary and x[1] < 10*DOLFIN_EPS_LARGE
+    return on_boundary and x[1] < tol
 
 def border(x, on_boundary):
-    return on_boundary and x[1] > H - 10*DOLFIN_EPS_LARGE
-
-k_min = k_inlet["coflow"]
-e_min = e_inlet["coflow"]
+    return on_boundary and x[1] > H - tol
 
 # Set lower and upper limits for computations
 limits = {"k": (k_min/100, 500.),
@@ -181,10 +172,10 @@ limits = {"k": (k_min/100, 500.),
 Q = FunctionSpace(mesh, "CG", 1)
 DG0 = FunctionSpace(mesh, "DG", 0)
 DG1 = FunctionSpace(mesh, "DG", 1)
-if model == "TH":
+if velocity_pressure_model == "TH":
     V = VectorFunctionSpace(mesh, "CG", 2)
     S = Q
-elif model == "CR":
+elif velocity_pressure_model == "CR":
     V = VectorFunctionSpace(mesh, "CR", 1)
     S = DG0
     
@@ -197,7 +188,6 @@ r_inv = Expression("x[1] > 1e-8 ? 1.0/x[1] : 0.0", domain=mesh)
 
 n = FacetNormal(mesh)
 h = CellSize(mesh)
-h_avg = (h('+') + h('-'))/2
 
 up = TrialFunction(VQ)
 vq = TestFunction(VQ)
@@ -210,28 +200,38 @@ u_, p_ = split(up_)
 # Turbulence
 if not coupled:
     # Space for k and epsilon
-    TSpace = DG1 if runDG else Q
+    TSpace = Q
     k = TrialFunction(TSpace)
     v_k = TestFunction(TSpace)
     e = TrialFunction(TSpace)
     v_e = TestFunction(TSpace)
-
     k_ = Function(TSpace, name="k")
     e_ = Function(TSpace, name="e")
 
 else:
     # Space for k and epsilon
-    TSpace = Q*Q
+    TSpace = Q * Q
     k, e = TrialFunctions(TSpace)
     v_k, v_e = TestFunctions(TSpace)
     ke_ = Function(TSpace, name="ke")
     k_, e_ = split(ke_)
     
+# Mixture fraction mean and variance
 MFSpace = Q
 mf = TrialFunction(MFSpace)
 v_mf = TestFunction(MFSpace)
 mf_ = Function(MFSpace, name="mf")
 var_ = Function(MFSpace, name="var")
+
+# This string gives a profile that looks like a combination of smoothed Haviside functions
+def smooth(comp):
+    ss = "{2}+0.5*(1.0+erf((R1-x[1])/sigma))*({0}-{1}) + 0.5*(1+erf((R2-x[1])/sigma))*({1}-{2})"
+    return ss.format(inletvalues[comp]["jet"], inletvalues[comp]["pilot"], inletvalues[comp]["coflow"])
+
+# Create smoothed Expressions for all components on inlet
+inlet_Exp = {comp: Expression(smooth(comp), R1=R1, R2=R2, sigma=sigma[comp] ) for comp in ("k", "e", "mf", "var")}
+inlet_Exp["ke"] = Expression((smooth("k"), smooth("e")), R1=R1, R2=R2, sigma=sigma["ke"] )
+inlet_Exp["u"] = Expression((smooth("u"), "0"), R1=R1, R2=R2, sigma=sigma["u"])
     
 # Create some dictionaries to hold work matrices and functions
 class Mat_cache_dict(dict):
@@ -292,6 +292,16 @@ nut = nut_.form
 P_ = Pr_ = derived_quantity("P", DG0, 2*nut_*inner(sym(grad(u_)), sym(grad(u_)))*r+2*nut_*u_[1]*u_[1]*r_inv, cyl=False)
 Pr = Pr_.form
 
+q_ = {"up": up_, "nut": nut_, "mf": mf_, "var": var_}
+x_ = {"up": up_.vector(), "nut": nut_.vector(), "P": P_.vector(), "T": T_.vector(), 
+      "mf": mf_.vector(), "var": var_.vector()}
+if coupled:
+    x_.update({"ke": ke_.vector()})
+    q_["ke"] = ke_
+else:
+    x_.update({"k": k_.vector(), "e": e_.vector()})
+    q_.update({"k": k_, "e": e_})
+
 # Create effective viscosity - the sum of viscosity and turbulent viscosity
 # A minimum of CellSize is added for stability. This mimicks the effect of upwinding
 nutt = nu + nut_ + CellSize(mesh)*Constant(beta)
@@ -300,19 +310,7 @@ nute = nu + nut_*(1./sigma_e) + CellSize(mesh)*Constant(beta)
 #vv = v + h*dot(grad(v), u_)
 vv = v
 
-#bc0 = DirichletBC(VQ.sub(0), one_over_seven_jet,  jet)
-#bc1 = DirichletBC(VQ.sub(0), constantpilot,  pilot)
-#bc2 = DirichletBC(VQ.sub(0), constantcoflow,  coflow)
-bcin = DirichletBC(VQ.sub(0), uin, inlet)
-bc3 = DirichletBC(VQ.sub(0).sub(1), 0, centerline)
-bc4 = DirichletBC(VQ.sub(0).sub(1), 0, border)
-#bcs = [bc0, bc1, bc2, bc3]
-
-bcs = {}
-bcs['up'] = [bcin, bc3, bc4]
-
 # Variational form of Navier-Stokes in cylinder coordinates
-U = 0.5*(u+u_)
 NS =(inner(dot(grad(u_), u_), vv)*r*dx()
      + 2*nutt*inner(sym(grad(u_)), grad(vv))*r*dx() 
      + 2*nutt*u_[1]*vv[1]/r*dx()
@@ -329,15 +327,6 @@ NS_P =(inner(dot(grad(u), u_), vv)*r*dx()
      - nutt*inner(dot(grad(u).T, n), vv)*r*ds() 
      + inner(Constant((0, 0)), vv)*dx() )
 
-def info_blue(s, check=True):
-    if MPI.rank(mpi_comm_world())==0 and check:
-        print BLUE % s
-
-class SandiaTimer(Timer):
-    def __init__(self, task, verbose=False):
-        Timer.__init__(self, task)
-        info_blue(task, verbose)
-
 J = derivative(NS, up_, up)
 up_sol = LUSolver("mumps")
 up_sol.parameters["same_nonzero_pattern"] = True
@@ -351,90 +340,65 @@ un = (dot(u_, n) + abs(dot(u_, n)))/2.0
 # Penalty term
 alpha = Constant(5000.0)
 
-if runDG:
-    Fke = { "k": dot(grad(v_k), nutt*grad(k) - u_*k)*r*dx \
-            +avg(nutt)*(alpha/h('+'))*dot(jump(v_k, n), jump(k, n))*avg(r)*dS \
-            -avg(nutt)*dot(avg(grad(v_k)), jump(k, n))*avg(r)*dS \
-            -avg(nutt)*dot(jump(v_k, n), avg(grad(k)))*avg(r)*dS \
-            +dot(jump(v_k), un('+')*k('+') - un('-')*k('-') )*avg(r)*dS  \
-            +dot(v_k, un*k)*r*ds \
-            -P_*v_k*r*dx() + k*e_/k_ *v_k*r*dx(),           
-         
-        "e": dot(grad(v_e), nute*grad(e) - u_*e)*r*dx \
-            +avg(nute)*(alpha/h('+'))*dot(jump(v_e, n), jump(e, n))*avg(r)*dS 
-            -avg(nute)*dot(avg(grad(v_e)), jump(e, n))*avg(r)*dS \
-            -avg(nute)*dot(jump(v_e, n), avg(grad(e)))*avg(r)*dS \
-            +dot(jump(v_e), un('+')*e('+') - un('-')*e('-') )*avg(r)*dS  \
-            +dot(v_e, un*e)*r*ds \
-            - (Ce1*P_ - Ce2*e)*e_/k_*v_e*r*dx()
-            
-         }
-else:
-    Fke = { "k": nutt*inner(grad(vvk), grad(k))*r*dx() \
-             + inner(vvk, dot(grad(k), u_))*r*dx() \
-             - Pr*vvk*dx() + k*e_/k_*vvk*r*dx(),
-         
-        "e": (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
-             + inner(vve, dot(grad(e), u_))*r*dx() \
-             - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx(),
-         
-        "ke": nutt*inner(grad(vvk), grad(k))*r*dx() \
-             + inner(vvk, dot(grad(k), u_))*r*dx() \
-             - Pr*vvk*dx() + e*vvk*r*dx() \
-             + (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
-             + inner(vve, dot(grad(e), u_))*r*dx() \
-             - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx()
-         }
+Fke = { 
+    "k": nutt*inner(grad(vvk), grad(k))*r*dx() \
+            + inner(vvk, dot(grad(k), u_))*r*dx() \
+            - Pr*vvk*dx() + k*e_/k_*vvk*r*dx(),
+        
+    "e": (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
+            + inner(vve, dot(grad(e), u_))*r*dx() \
+            - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx(),
+        
+    "ke": nutt*inner(grad(vvk), grad(k))*r*dx() \
+            + inner(vvk, dot(grad(k), u_))*r*dx() \
+            - Pr*vvk*dx() + e*vvk*r*dx() \
+            + (nu + nut_*(1./sigma_e))*inner(grad(vve), grad(e))*r*dx() \
+            + inner(vve, dot(grad(e), u_))*r*dx() \
+            - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx()
+}
     
 Fmfv = { "mf": nutt*inner(grad(mf), grad(v_mf))*r*dx() \
              + inner(v_mf, dot(grad(mf), u_))*r*dx(),
          
          "var": nutt*inner(grad(mf), grad(v_mf))*r*dx() \
              + inner(v_mf, dot(grad(mf), u_))*r*dx() \
-             + 2*e_/k_*v_mf*(mf - mf_*mf_)*r*dx()}    
+             + 2*e_/k_*v_mf*(mf - mf_*mf_)*r*dx()
+}    
 
 A = defaultdict(lambda : Matrix())
 b = defaultdict(lambda : Vector())
 
-uin0 = interpolate(uin0, Q)
-
-if coupled:
-    bcs["ke"] = [DirichletBC(TSpace, kein, inlet, "geometric"),
-                 DirichletBC(TSpace, (k_min, e_min), border, "geometric")]
-else:
-    bcs["k"] = [DirichletBC(TSpace, kin, inlet, "geometric"), 
-                DirichletBC(TSpace, k_min, border, "geometric")]
-    bcs["e"] = [DirichletBC(TSpace, ein, inlet, "geometric"), 
-                DirichletBC(TSpace, e_min, border, "geometric")]
+#Create boundary conditions
+bcs = defaultdict(lambda : [], {
+    "up":  [DirichletBC(VQ.sub(0), inlet_Exp["u"], inlet),
+            DirichletBC(VQ.sub(0).sub(1), 0, centerline),
+            DirichletBC(VQ.sub(0).sub(1), 0, border)],
+        
+    "mf":  [DirichletBC(MFSpace, inlet_Exp["mf"], inlet, "geometric"), 
+            DirichletBC(MFSpace, 0, border, "geometric")],
     
-bcs["nut"] = []
-bcs["T"] = []
-bcs["P"] = []
-
-bcs["mf"]  = [DirichletBC(MFSpace, mfin, inlet, "geometric"), 
-              DirichletBC(MFSpace, 0, border, "geometric")]
-bcs["var"] = [DirichletBC(MFSpace, varin, inlet, "geometric"), 
-              DirichletBC(MFSpace, 0, border, "geometric")]
-
-q_ = {"up": up_, "nut": nut_, "P": P_, "T": T_, "mf": mf_, "var": var_}
-x_ = {"up": up_.vector(), "nut": nut_.vector(), "P": P_.vector(), "T": T_.vector(), 
-      "mf": mf_.vector(), "var": var_.vector()}
+    "var": [DirichletBC(MFSpace, inlet_Exp["var"], inlet, "geometric"), 
+            DirichletBC(MFSpace, 0, border, "geometric")]
+})
 
 if coupled:
-    x_.update({"ke": ke_.vector()})
-    q_["ke"] = ke_
-else:
-    x_.update({"k": k_.vector(), "e": e_.vector()})
-    q_.update({"k": k_, "e": e_})
+    bcs["ke"] =  [DirichletBC(TSpace, inlet_Exp["ke"], inlet, "geometric"),
+                  DirichletBC(TSpace, (k_min, e_min), border, "geometric")]
+    
+else:    
+    bcs["k"]  =  [DirichletBC(TSpace, inlet_Exp["k"], inlet, "geometric"), 
+                  DirichletBC(TSpace, k_min, border, "geometric")]
+    
+    bcs["e"]  =  [DirichletBC(TSpace, inlet_Exp["e"], inlet, "geometric"), 
+                  DirichletBC(TSpace, e_min, border, "geometric")]
+    
 
-ke_sol = LUSolver("mumps")
-ke_sol.parameters["same_nonzero_pattern"] = True
-mf_sol = LUSolver("mumps")
-mf_sol.parameters["same_nonzero_pattern"] = True
-#ke_sol = KrylovSolver("bicgstab", "ilu")
-#ke_sol.parameters["nonzero_initial_guess"] = True
-#ke_sol.parameters["monitor_convergence"] = True
-#ke_sol.parameters["preconditioner"]["structure"] = "same_nonzero_pattern"
+parameters["lu_solver"]["same_nonzero_pattern"] = True
+solver = defaultdict(lambda : LUSolver("mumps"))
+#solver["k"] = KrylovSolver("bicgstab", "ilu")
+#solver["k"].parameters["nonzero_initial_guess"] = True
+#solver["k"].parameters["monitor_convergence"] = True
+#solver["k"].parameters["preconditioner"]["structure"] = "same_nonzero_pattern"
     
 def velocity_iter_Newton(om=-1):
     # Newton iteration for steady flow
@@ -445,19 +409,19 @@ def velocity_iter_Newton(om=-1):
     om = omega["up"] if om==-1 else om
     func = Fun_cache[VQ]
     func.vector().zero()
-    up_sol.solve(A["up"], func.vector(), b["up"])
+    solver["up"].solve(A["up"], func.vector(), b["up"])
     up_.vector().axpy(-om, func.vector())
     up_.vector().apply("insert")     
     
-    assemble(NS, tensor=b["up"])
-    for bc in bcs['up']:
+    assemble(NS, tnsor=b["up"])
+    for bc in bcs["up"]:
         bc.apply(b["up"], up_.vector())
 
     return b["up"].norm('l2') 
 
 def velocity_iter_Picard(om=-1):
     # Newton iteration for steady flow
-    timer = SandiaTimer("Velocity/Pressure", False)
+    timer = Timer("Velocity/Pressure")
     assemble(lhs(NS_P), tensor=A["up"])
     assemble(rhs(NS_P), tensor=b["up"])
     
@@ -467,7 +431,7 @@ def velocity_iter_Picard(om=-1):
     om = omega["up"] if om==-1 else om
     func = Fun_cache[VQ]
     func.vector().zero()
-    up_sol.solve(A["up"], func.vector(), b["up"])
+    solver["up"].solve(A["up"], func.vector(), b["up"])
     func.vector().axpy(-1., up_.vector())
     up_.vector().axpy(om, func.vector())    
 
@@ -477,7 +441,7 @@ count=0
 def ke_iter_Picard(comp, om=-1):
     # Newton iterations for steady flow
     global count
-    timer = SandiaTimer("Turbulence {}".format(comp), False)
+    timer = Timer("Turbulence {}".format(comp))
     
     assemble(lhs(Fke[comp]), tensor=A[comp])
     assemble(rhs(Fke[comp]), tensor=b[comp])
@@ -487,7 +451,7 @@ def ke_iter_Picard(comp, om=-1):
     om = omega[comp] if om==-1 else om
     dk = Fun_cache[TSpace]
     dk.vector()[:] = x_[comp]
-    ke_sol.solve(A[comp], dk.vector(), b[comp])
+    solver["ke"].solve(A[comp], dk.vector(), b[comp])
     bound(dk.vector(), low_lim=limits[comp][0], upp_lim=limits[comp][1])
     dk.vector().axpy(-1., x_[comp])
     x_[comp].axpy(om, dk.vector())    
@@ -507,7 +471,7 @@ def mfv_solution():
     for bc in bcs["mf"]:
         bc.apply(A["mf"], work)
 
-    mf_sol.solve(A["mf"], x_["mf"], work)
+    solver["mf"].solve(A["mf"], x_["mf"], work)
     bound(mf_.vector(), 0, 1)
     
     assemble(lhs(Fmfv["var"]), tensor=A["mf"])
@@ -515,7 +479,7 @@ def mfv_solution():
     work.zero()
     for bc in bcs["var"]:
         bc.apply(A["mf"], b["var"])
-    mf_sol.solve(A["mf"], x_["var"], b["var"])
+    solver["mf"].solve(A["mf"], x_["var"], b["var"])
     bound(var_.vector(), 0, 1)
 
 # initialize solution
@@ -553,7 +517,7 @@ def store_solution(for_plotting=False):
             newfile = HDF5File(mpi_comm_world(), h5file, "w")
             newfile.write(val, val.name())    
     else:
-        foldername = "../plotresults/{}".format(V.dim())
+        foldername = "../VTK/{}".format(V.dim())
         try:
             makedirs(foldername)
         except OSError:
@@ -576,6 +540,7 @@ def read_solution():
     foldername = "../results/{}".format(V.dim())
     if not path.exists(foldername):        
         raise IOError(foldername+" does not exist")
+        return
         
     for h5file in os.listdir(foldername):
         newfile = HDF5File(mpi_comm_world(), path.join(foldername, h5file), "r")
@@ -617,7 +582,8 @@ def iterate_mfv(max_iters=100):
         iter += 1
         print "{0:5d} {1:2.5e}".format(iter, error)    
     
-#iterate(max_iters)
-read_solution()
+iterate(max_iters)
+#read_solution()
 mfv_solution()
+store_solution(True)
 
