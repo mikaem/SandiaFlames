@@ -5,6 +5,7 @@ __license__  = "GNU Lesser GPL version 3 or any later version"
 
 from dolfin import *
 from numpy import array, linspace, log, minimum, maximum
+from os import makedirs, path
 from collections import defaultdict
 import numpy
 import json
@@ -16,7 +17,7 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["representation"] = "quadrature"
 #parameters["form_compiler"]["quadrature_degree"] = 2 
 parameters["form_compiler"]["cpp_optimize_flags"] = "-O3 --fast-math"
-set_log_active(False)
+#set_log_active(False)
 
 params = dict(
     R1 = 3.6e-3,  # Inner radius pilot
@@ -24,12 +25,12 @@ params = dict(
     H = 0.15,     # Length of mesh
     L = 0.4,      # Height of mesh
     cl4 = 0.001, # Mesh density (L, 0)
-    cl3 = 0.005,  # Mesh density (L, H)
-    cl2 = 0.005,  # Mesh density (0, H)
+    cl3 = 0.003,  # Mesh density (L, H)
+    cl2 = 0.003,  # Mesh density (0, H)
     cl1 = 0.0001, # Mesh density (0, 0)
     case = "D",
     model = "CR", #Velocity-pressure function spaces
-    beta = 0.01,  # Numerical stability parameter
+    beta = 0.01,  # Numerical stability parameter (artificial viscosity = beta * meshsize)
     runDG = False,# DG model or not (experimental)
     nu = Constant(1.58e-5),
     max_error = 1e-7,
@@ -94,13 +95,13 @@ omega = defaultdict(lambda : 0.8, {"nut": 0.8})
 
 ##
 cases = {
-      "C": {'U_jet': 29.7, # m/s
-            'U_pilot': 6.8,
-            'U_coflow': 0.9},
+      "C": {'jet': 29.7, # m/s
+            'pilot': 6.8,
+            'coflow': 0.9},
       
-      "D": {'U_jet': 49.6,
-            'U_pilot': 11.4,
-            'U_coflow': 0.9}
+      "D": {'jet': 49.6,
+            'pilot': 11.4,
+            'coflow': 0.9}
       }
 
 # k-epsilon model coefficients
@@ -114,28 +115,34 @@ model_prm = dict(
 
 vars().update(model_prm)      
 
-k_inlet = {"k_jet": 0.5*pow(cases[case]["U_jet"], 2)*0.01,
-           "k_pilot": 0.5*pow(cases[case]["U_pilot"], 2)*0.01,
-           "k_coflow": 0.5*pow(cases[case]["U_coflow"], 2)*0.005}
+k_inlet = {"jet": 0.5*pow(cases[case]["jet"], 2)*0.01,
+           "pilot": 0.5*pow(cases[case]["pilot"], 2)*0.01,
+           "coflow": 0.5*pow(cases[case]["coflow"], 2)*0.005}
 
-e_inlet = {"e_jet": pow(Cmu(0), 0.75)*pow(k_inlet["k_jet"], 1.5) / 0.001,
-           "e_pilot": pow(Cmu(0), 0.75)*pow(k_inlet["k_pilot"], 1.5) / 0.0025,
-           "e_coflow": pow(Cmu(0), 0.75)*pow(k_inlet["k_coflow"], 1.5) / 0.05}
+e_inlet = {"jet": pow(Cmu(0), 0.75)*pow(k_inlet["jet"], 1.5) / 0.001,
+           "pilot": pow(Cmu(0), 0.75)*pow(k_inlet["pilot"], 1.5) / 0.0025,
+           "coflow": pow(Cmu(0), 0.75)*pow(k_inlet["coflow"], 1.5) / 0.05}
 
-smoothinlet = "0.5*(1.0+erf((R1-x[1])/sigma))*jet + cof + (1.0-cof)*0.5*(1+erf((R2-x[1])/sigma))*(pilot-cof)"
+mf_inlet = {"jet": 1, "pilot": 0.25, "coflow": 0}
+var_inlet = {"jet": 1, "pilot": 0.0625, "coflow": 0}
 
-uin = Expression((smoothinlet, "0"), R1=R1, R2=R2, pilot=cases[case]["U_pilot"],
-                 cof=cases[case]["U_coflow"], jet=cases[case]["U_jet"], sigma=sigma)
+#smoothinlet = "0.5*(1.0+erf((R1-x[1])/sigma))*{0} + {2} + (1.0-{2})*0.5*(1+erf((R2-x[1])/sigma))*({1}-{2})"
+smoothinlet = "{2}+0.5*(1.0+erf((R1-x[1])/sigma))*({0}-{1}) + 0.5*(1+erf((R2-x[1])/sigma))*({1}-{2})"
 
-uin0 = Expression(smoothinlet, R1=R1, R2=R2, pilot=cases[case]["U_pilot"],
-                 cof=cases[case]["U_coflow"], jet=cases[case]["U_jet"], sigma=sigma)
+usmooth = smoothinlet.format(cases[case]["jet"], cases[case]["pilot"], cases[case]["coflow"])
+ksmooth = smoothinlet.format(k_inlet["jet"], k_inlet["pilot"], k_inlet["coflow"])
+esmooth = smoothinlet.format(e_inlet["jet"], e_inlet["pilot"], e_inlet["coflow"])
+mfsmooth = smoothinlet.format(mf_inlet["jet"], mf_inlet["pilot"], mf_inlet["coflow"])
+varsmooth = smoothinlet.format(var_inlet["jet"], var_inlet["pilot"], var_inlet["coflow"])
 
-kin = Expression(smoothinlet, R1=R1, R2=R2, pilot=k_inlet["k_pilot"],
-                 cof=k_inlet["k_coflow"], jet=k_inlet["k_jet"], sigma=sigma)
+uin = Expression((usmooth, "0"), R1=R1, R2=R2, sigma=sigma)
 
-ein = Expression(smoothinlet, R1=R1, R2=R2, pilot=e_inlet["e_pilot"], 
-                 cof=e_inlet["e_coflow"], jet=e_inlet["e_jet"], sigma=sigma)
-
+uin0 = Expression(usmooth, R1=R1, R2=R2, sigma=sigma)
+kin = Expression(ksmooth, R1=R1, R2=R2, sigma=sigma)
+ein = Expression(esmooth, R1=R1, R2=R2, sigma=sigma)
+kein = Expression((ksmooth, esmooth), R1=R1, R2=R2, sigma=sigma)
+mfin = Expression(mfsmooth, R1=R1, R2=R2, sigma=0.0002)
+varin = Expression(varsmooth, R1=R1, R2=R2, sigma=0.0002)
 
 def jet(x, on_boundary): 
     return on_boundary and  x[1] < R1 + 10*DOLFIN_EPS_LARGE and x[0] < 10*DOLFIN_EPS_LARGE
@@ -158,15 +165,17 @@ def centerline(x, on_boundary):
 def border(x, on_boundary):
     return on_boundary and x[1] > H - 10*DOLFIN_EPS_LARGE
 
-k_min = k_inlet["k_coflow"]
-e_min = e_inlet["e_coflow"]
+k_min = k_inlet["coflow"]
+e_min = e_inlet["coflow"]
 
 # Set lower and upper limits for computations
 limits = {"k": (k_min/100, 500.),
           "e": (e_min/100, 1e7),
           "nut": (1e-6, 0.01),
           "T": (1e-6, 1e3),
-          "ke": (k_min/100, 1e7)}
+          "ke": (k_min/100, 1e7),
+          "mf": (0, 1),
+          "var": (0, 1)}
 
 # Define relevant function spaces
 Q = FunctionSpace(mesh, "CG", 1)
@@ -217,6 +226,12 @@ else:
     v_k, v_e = TestFunctions(TSpace)
     ke_ = Function(TSpace, name="ke")
     k_, e_ = split(ke_)
+    
+MFSpace = Q
+mf = TrialFunction(MFSpace)
+v_mf = TestFunction(MFSpace)
+mf_ = Function(MFSpace, name="mf")
+var_ = Function(MFSpace, name="var")
     
 # Create some dictionaries to hold work matrices and functions
 class Mat_cache_dict(dict):
@@ -314,6 +329,15 @@ NS_P =(inner(dot(grad(u), u_), vv)*r*dx()
      - nutt*inner(dot(grad(u).T, n), vv)*r*ds() 
      + inner(Constant((0, 0)), vv)*dx() )
 
+def info_blue(s, check=True):
+    if MPI.rank(mpi_comm_world())==0 and check:
+        print BLUE % s
+
+class SandiaTimer(Timer):
+    def __init__(self, task, verbose=False):
+        Timer.__init__(self, task)
+        info_blue(task, verbose)
+
 J = derivative(NS, up_, up)
 up_sol = LUSolver("mumps")
 up_sol.parameters["same_nonzero_pattern"] = True
@@ -361,42 +385,22 @@ else:
              + inner(vve, dot(grad(e), u_))*r*dx() \
              - (Ce1*Pr - Ce2*e*r)*e_/k_*vve*dx()
          }
-        
+    
+Fmfv = { "mf": nutt*inner(grad(mf), grad(v_mf))*r*dx() \
+             + inner(v_mf, dot(grad(mf), u_))*r*dx(),
+         
+         "var": nutt*inner(grad(mf), grad(v_mf))*r*dx() \
+             + inner(v_mf, dot(grad(mf), u_))*r*dx() \
+             + 2*e_/k_*v_mf*(mf - mf_*mf_)*r*dx()}    
+
 A = defaultdict(lambda : Matrix())
 b = defaultdict(lambda : Vector())
 
 uin0 = interpolate(uin0, Q)
-class k_in(Expression):
-    def eval(self, values, x):
-        intensity = 0.01 if x[1] < R2 else 0.005
-        values[0] = 0.5*pow(uin0(x), 2)*intensity
-
-class e_in(Expression):
-    def eval(self, values, x):
-        kk = 0.5*pow(uin0(x), 2)*0.01
-        if x[1] < R1 and x[0] < 10*DOLFIN_EPS_LARGE:
-            values[0] = pow(Cmu(0), 0.75)*pow(kk, 1.5) / (0.001)
-        elif x[1] < R2 and x[0] < 10*DOLFIN_EPS_LARGE:
-            values[0] = pow(Cmu(0), 0.75)*pow(kk, 1.5) / (0.0025)
-        else:
-            values[0] = e_min
-
-class ke_in(Expression):
-    def eval(self, values, x):
-        intensity = 0.01 if x[1] < R2 else 0.005
-        values[0] = 0.5*pow(uin0(x), 2)*intensity
-        if x[1] < R1 and x[0] < 10*DOLFIN_EPS_LARGE:
-            values[1] = pow(Cmu(0), 0.75)*pow(values[0], 1.5) / (0.001)
-        elif x[1] < R2 and x[0] < 10*DOLFIN_EPS_LARGE:
-            values[1] = pow(Cmu(0), 0.75)*pow(values[0], 1.5) / (0.0025)
-        else:
-            values[1] = e_min
-
-    def value_shape(self):
-        return (2,)
 
 if coupled:
-    bcs["ke"] = [DirichletBC(TSpace, ke_in(), inlet, "geometric")]
+    bcs["ke"] = [DirichletBC(TSpace, kein, inlet, "geometric"),
+                 DirichletBC(TSpace, (k_min, e_min), border, "geometric")]
 else:
     bcs["k"] = [DirichletBC(TSpace, kin, inlet, "geometric"), 
                 DirichletBC(TSpace, k_min, border, "geometric")]
@@ -407,16 +411,30 @@ bcs["nut"] = []
 bcs["T"] = []
 bcs["P"] = []
 
-q_ = {"up": up_, "k": k_, "e": e_, "nut": nut_, "P": P_, "T": T_}
-x_ = {"up":up_.vector(), "nut": nut_.vector(), "P": P_.vector(), "T": T_.vector()}
+bcs["mf"]  = [DirichletBC(MFSpace, mfin, inlet, "geometric"), 
+              DirichletBC(MFSpace, 0, border, "geometric")]
+bcs["var"] = [DirichletBC(MFSpace, varin, inlet, "geometric"), 
+              DirichletBC(MFSpace, 0, border, "geometric")]
+
+q_ = {"up": up_, "nut": nut_, "P": P_, "T": T_, "mf": mf_, "var": var_}
+x_ = {"up": up_.vector(), "nut": nut_.vector(), "P": P_.vector(), "T": T_.vector(), 
+      "mf": mf_.vector(), "var": var_.vector()}
+
 if coupled:
     x_.update({"ke": ke_.vector()})
     q_["ke"] = ke_
 else:
     x_.update({"k": k_.vector(), "e": e_.vector()})
+    q_.update({"k": k_, "e": e_})
 
 ke_sol = LUSolver("mumps")
 ke_sol.parameters["same_nonzero_pattern"] = True
+mf_sol = LUSolver("mumps")
+mf_sol.parameters["same_nonzero_pattern"] = True
+#ke_sol = KrylovSolver("bicgstab", "ilu")
+#ke_sol.parameters["nonzero_initial_guess"] = True
+#ke_sol.parameters["monitor_convergence"] = True
+#ke_sol.parameters["preconditioner"]["structure"] = "same_nonzero_pattern"
     
 def velocity_iter_Newton(om=-1):
     # Newton iteration for steady flow
@@ -439,8 +457,10 @@ def velocity_iter_Newton(om=-1):
 
 def velocity_iter_Picard(om=-1):
     # Newton iteration for steady flow
+    timer = SandiaTimer("Velocity/Pressure", False)
     assemble(lhs(NS_P), tensor=A["up"])
     assemble(rhs(NS_P), tensor=b["up"])
+    
     for bc in bcs['up']:
         bc.apply(A["up"], b["up"])
 
@@ -457,6 +477,7 @@ count=0
 def ke_iter_Picard(comp, om=-1):
     # Newton iterations for steady flow
     global count
+    timer = SandiaTimer("Turbulence {}".format(comp), False)
     
     assemble(lhs(Fke[comp]), tensor=A[comp])
     assemble(rhs(Fke[comp]), tensor=b[comp])
@@ -465,7 +486,7 @@ def ke_iter_Picard(comp, om=-1):
 
     om = omega[comp] if om==-1 else om
     dk = Fun_cache[TSpace]
-    dk.vector().zero()
+    dk.vector()[:] = x_[comp]
     ke_sol.solve(A[comp], dk.vector(), b[comp])
     bound(dk.vector(), low_lim=limits[comp][0], upp_lim=limits[comp][1])
     dk.vector().axpy(-1., x_[comp])
@@ -478,6 +499,24 @@ def ke_iter_Picard(comp, om=-1):
             plot(dk, title="Error in e")
             
     return dk.vector().norm("l2") / x_[comp].norm("l2")
+
+def mfv_solution():
+    # Solve mixture fraction equations (linear and thus noniterative)
+    assemble(lhs(Fmfv["mf"]), tensor=A["mf"])
+    work = Vector(x_["mf"])
+    for bc in bcs["mf"]:
+        bc.apply(A["mf"], work)
+
+    mf_sol.solve(A["mf"], x_["mf"], work)
+    bound(mf_.vector(), 0, 1)
+    
+    assemble(lhs(Fmfv["var"]), tensor=A["mf"])
+    assemble(rhs(Fmfv["var"]), tensor=b["var"])
+    work.zero()
+    for bc in bcs["var"]:
+        bc.apply(A["mf"], b["var"])
+    mf_sol.solve(A["mf"], x_["var"], b["var"])
+    bound(var_.vector(), 0, 1)
 
 # initialize solution
 if coupled:
@@ -492,7 +531,7 @@ x_["T"][:] = k_min/e_min
 x_["P"][:] = 0
 
 # For Newton iterations following is required. For Picard it doesn't hurt
-b["up"] = assemble(NS)
+assemble(NS, tensor=b["up"])
 for bc in bcs["up"]:
     bc.apply(b["up"], up_.vector())
 
@@ -500,6 +539,50 @@ for bc in bcs["up"]:
 for name, val in bcs.iteritems():
     for bc in val:
         bc.apply(x_[name])    
+
+def store_solution(for_plotting=False):
+    if for_plotting == False:
+        foldername = "../results/{}".format(V.dim())
+        try:
+            makedirs(foldername)
+        except OSError:
+            pass
+        
+        for key, val in q_.iteritems():
+            h5file = path.join(foldername, key+".h5")
+            newfile = HDF5File(mpi_comm_world(), h5file, "w")
+            newfile.write(val, val.name())    
+    else:
+        foldername = "../plotresults/{}".format(V.dim())
+        try:
+            makedirs(foldername)
+        except OSError:
+            pass
+        
+        for key, val in q_.iteritems():
+            if not key == "up":
+                h5file = path.join(foldername, key+".xdmf")
+                newfile = XDMFFile(mpi_comm_world(), h5file)
+                newfile << (val, 0.0)
+            else:
+                h5file = path.join(foldername, "u.xdmf")
+                newfile = XDMFFile(mpi_comm_world(), h5file)
+                newfile << (Function(project(val.sub(0), V), name="u"), 0.0)
+                h5file = path.join(foldername, "p.xdmf")
+                newfile = XDMFFile(mpi_comm_world(), h5file)
+                newfile << (Function(project(val.sub(1), S), name="p"), 0.0)
+
+def read_solution():
+    foldername = "../results/{}".format(V.dim())
+    if not path.exists(foldername):        
+        raise IOError(foldername+" does not exist")
+        
+    for h5file in os.listdir(foldername):
+        newfile = HDF5File(mpi_comm_world(), path.join(foldername, h5file), "r")
+        try:
+            newfile.read(q_[h5file[:-3]], h5file[:-3])
+        except:
+            pass
             
 def iterate(max_iters=100):
     iter = 0
@@ -526,4 +609,15 @@ def iterate(max_iters=100):
         print "{0:5d} {1:2.5e} {2:2.5e} {3:2.5e} {4:2.5e} ".format(iter, error, error_k, error_e, nut_.vector().norm("l2"))
         error = max(error, max(error_k, error_e))
 
-iterate(max_iters)
+def iterate_mfv(max_iters=100):
+    iter = 0
+    error = 1
+    while iter < max_iters and error > max_error: 
+        error = mfv_iter_Newton()
+        iter += 1
+        print "{0:5d} {1:2.5e}".format(iter, error)    
+    
+#iterate(max_iters)
+read_solution()
+mfv_solution()
+
