@@ -35,7 +35,7 @@ params = dict(
     max_error = 1e-7,
     coupled = False,
     max_iters = 200,
-    sigma = defaultdict(lambda : 0.00075, {"mf": 0.0001, "var": 0.0001}),  # Parameter used to create smooth inlet profiles. Lower value -> sharper Heaviside = less stable
+    sigma = defaultdict(lambda : 0.00075, {"mf": 0.0001, "c2":0.0001, "var": 0.0001}),  # Parameter used to create smooth inlet profiles. Lower value -> sharper Heaviside = less stable
 )
 
 # Any parameter may be overloaded on command line. Read them here
@@ -130,6 +130,8 @@ inletvalues.update(
 
     "mf":  {"jet": 1, "pilot": 0.25  , "coflow": 0},
     
+    "c2":  {"jet": 0, "pilot": 1.0  , "coflow": 0},
+    
     "var": {"jet": 1, "pilot": 0.0625, "coflow": 0}
 })    
     
@@ -221,6 +223,7 @@ MFSpace = Q
 mf = TrialFunction(MFSpace)
 v_mf = TestFunction(MFSpace)
 mf_ = Function(MFSpace, name="mf")
+c2_ = Function(MFSpace, name="c2")
 var_ = Function(MFSpace, name="var")
 
 # This string gives a profile that looks like a combination of smoothed Haviside functions
@@ -229,7 +232,7 @@ def smooth(comp):
     return ss.format(inletvalues[comp]["jet"], inletvalues[comp]["pilot"], inletvalues[comp]["coflow"])
 
 # Create smoothed Expressions for all components on inlet
-inlet_Exp = {comp: Expression(smooth(comp), R1=R1, R2=R2, sigma=sigma[comp] ) for comp in ("k", "e", "mf", "var")}
+inlet_Exp = {comp: Expression(smooth(comp), R1=R1, R2=R2, sigma=sigma[comp] ) for comp in ("k", "e", "mf", "c2", "var")}
 inlet_Exp["ke"] = Expression((smooth("k"), smooth("e")), R1=R1, R2=R2, sigma=sigma["ke"] )
 inlet_Exp["u"] = Expression((smooth("u"), "0"), R1=R1, R2=R2, sigma=sigma["u"])
     
@@ -292,9 +295,9 @@ nut = nut_.form
 P_ = Pr_ = derived_quantity("P", DG0, 2*nut_*inner(sym(grad(u_)), sym(grad(u_)))*r+2*nut_*u_[1]*u_[1]*r_inv, cyl=False)
 Pr = Pr_.form
 
-q_ = {"up": up_, "nut": nut_, "mf": mf_, "var": var_}
+q_ = {"up": up_, "nut": nut_, "mf": mf_, "c2": c2_, "var": var_}
 x_ = {"up": up_.vector(), "nut": nut_.vector(), "P": P_.vector(), "T": T_.vector(), 
-      "mf": mf_.vector(), "var": var_.vector()}
+      "mf": mf_.vector(), "c2": c2_.vector(), "var": var_.vector()}
 if coupled:
     x_.update({"ke": ke_.vector()})
     q_["ke"] = ke_
@@ -363,7 +366,9 @@ Fmfv = { "mf": nutt*inner(grad(mf), grad(v_mf))*r*dx() \
          "var": nutt*inner(grad(mf), grad(v_mf))*r*dx() \
              + inner(v_mf, dot(grad(mf), u_))*r*dx() \
              + 2*e_/k_*v_mf*(mf - mf_*mf_)*r*dx()
-}    
+}   
+
+Fmfv["c2"] = Fmfv["mf"]
 
 A = defaultdict(lambda : Matrix())
 b = defaultdict(lambda : Vector())
@@ -375,6 +380,9 @@ bcs = defaultdict(lambda : [], {
             DirichletBC(VQ.sub(0).sub(1), 0, border)],
         
     "mf":  [DirichletBC(MFSpace, inlet_Exp["mf"], inlet, "geometric"), 
+            DirichletBC(MFSpace, 0, border, "geometric")],
+    
+    "c2":  [DirichletBC(MFSpace, inlet_Exp["c2"], inlet, "geometric"), 
             DirichletBC(MFSpace, 0, border, "geometric")],
     
     "var": [DirichletBC(MFSpace, inlet_Exp["var"], inlet, "geometric"), 
@@ -473,6 +481,13 @@ def mfv_solution():
 
     solver["mf"].solve(A["mf"], x_["mf"], work)
     bound(mf_.vector(), 0, 1)
+
+    # Reuse matrix and solver for c2
+    for bc in bcs["c2"]:
+        bc.apply(work)
+
+    solver["mf"].solve(A["mf"], x_["c2"], work)
+    bound(c2_.vector(), 0, 1)
     
     assemble(lhs(Fmfv["var"]), tensor=A["mf"])
     assemble(rhs(Fmfv["var"]), tensor=b["var"])
