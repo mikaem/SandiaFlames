@@ -20,10 +20,16 @@ parameters["form_compiler"]["cpp_optimize_flags"] = "-O3 --fast-math"
 #set_log_active(False)
 
 params = dict(
-    R1 = 3.6e-3,  # Inner radius pilot
-    R2 = 9.1e-3,  # Outer radius pilot
-    H = 0.15,     # Length of mesh
-    L = 0.4,      # Height of mesh
+    #R1 = 3.6e-3,  # Inner radius pilot
+    #R2 = 9.1e-3,  # Outer radius pilot
+    #H = 0.15,     # Height of mesh
+    #L = 0.4,      # Length of mesh
+
+    R1 = 2e-3,    # Inner radius pilot
+    R2 = 3e-3,    # Outer radius pilot
+    H = 0.02,     # Height of mesh
+    L = 0.06,      # Length of mesh
+    
     cl4 = 0.002,  # Mesh density (L, 0)
     cl3 = 0.003,  # Mesh density (L, H)
     cl2 = 0.003,  # Mesh density (0, H)
@@ -87,7 +93,7 @@ if not os.path.isfile("../mesh/Sandia.xml") or ("remesh" in commandline_kwargs
 mesh = Mesh("../mesh/Sandia.xml")
 
 # Underrelaxation factors
-omega = defaultdict(lambda : 0.8, {"nut": 0.8})
+omega = defaultdict(lambda : 0.7, {"nut": 0.7})
 
 # k-epsilon model coefficients
 model_prm = dict(
@@ -111,7 +117,11 @@ inletvalues = {
         
         "D": {"jet": 49.6,
               "pilot": 11.4,
-              "coflow": 0.9}
+              "coflow": 0.9},
+        
+        "O": {"jet": 20.,
+              "pilot": 0.0,
+              "coflow": 0.1}
     }[case]
 }
 
